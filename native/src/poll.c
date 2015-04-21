@@ -17,7 +17,7 @@
 /*
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: poll.c 1525525 2013-09-23 08:08:56Z rjung $
  */
 
 #include "tcn.h"
@@ -360,23 +360,15 @@ TCN_IMPLEMENT_CALL(jint, Poll, poll)(TCN_STDARGS, jlong pollset,
             tcn_socket_t *s = (tcn_socket_t *)fd->client_data;
             p->set[i*2+0] = (jlong)(fd->rtnevents);
             p->set[i*2+1] = P2J(s);
-            /* If a socket is registered for multiple events and the poller has
-               multiple events to return it may do as a single pair in this
-               array or as multiple pairs depending on implementation. On OSX at
-               least, multiple pairs have been observed. In this case do not try
-               and remove socket from the pollset for a second time else a crash
-               will result. */ 
             if (remove) {
-                if (s->pe) {
-                    apr_pollset_remove(p->pollset, fd);
-                    APR_RING_REMOVE(s->pe, link);
-                    APR_RING_INSERT_TAIL(&p->dead_ring, s->pe, tcn_pfde_t, link);
-                    s->pe = NULL;
-                    p->nelts--;
+                apr_pollset_remove(p->pollset, fd);
+                APR_RING_REMOVE(s->pe, link);
+                APR_RING_INSERT_TAIL(&p->dead_ring, s->pe, tcn_pfde_t, link);
+                s->pe = NULL;
+                p->nelts--;
 #ifdef TCN_DO_STATISTICS
-                    p->sp_removed++;
+                p->sp_removed++;
 #endif
-                }
             }
             else {
                 /* Update last active with the current time

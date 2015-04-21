@@ -17,7 +17,7 @@
 /*
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: file.c 1442587 2013-02-05 13:49:48Z rjung $
  */
  
 #include "tcn.h"

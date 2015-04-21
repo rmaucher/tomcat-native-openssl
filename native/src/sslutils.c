@@ -17,7 +17,7 @@
 /** SSL Utilities
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: sslutils.c 1507125 2013-07-25 21:01:25Z schultz $
  */
 
 #include "tcn.h"
@@ -254,7 +254,6 @@ static unsigned char dhxxx2_g[]={
 
 static DH *get_dh(int idx)
 {
-#if (OPENSSL_VERSION_NUMBER < 0x10100000L) || defined(OPENSSL_USE_DEPRECATED)
     DH *dh;
 
     if ((dh = DH_new()) == NULL)
@@ -280,9 +279,6 @@ static DH *get_dh(int idx)
     }
     else
         return dh;
-#else
-    return NULL;
-#endif
 }
 
 DH *SSL_dh_get_tmp_param(int key_len)
@@ -420,6 +416,7 @@ int SSL_CTX_use_certificate_chain(SSL_CTX *ctx, const char *file,
     X509 *x509;
     unsigned long err;
     int n;
+    STACK_OF(X509) *extra_certs;
 
     if ((bio = BIO_new(BIO_s_file_internal())) == NULL)
         return -1;
@@ -435,10 +432,12 @@ int SSL_CTX_use_certificate_chain(SSL_CTX *ctx, const char *file,
         }
         X509_free(x509);
     }
-
     /* free a perhaps already configured extra chain */
-    SSL_CTX_clear_extra_chain_certs(ctx);
-
+    extra_certs = SSL_CTX_get_extra_certs(ctx);
+    if (extra_certs != NULL) {
+        sk_X509_pop_free(extra_certs, X509_free);
+        SSL_CTX_set_extra_certs(ctx,NULL);
+    }
     /* create new extra chain by loading the certs */
     n = 0;
     while ((x509 = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
@@ -474,7 +473,7 @@ static int ssl_X509_STORE_lookup(X509_STORE *store, int yype,
     return rc;
 }
 
-static int ssl_verify_CRL(int ok, X509_STORE_CTX *ctx, tcn_ssl_conn_t *con)
+static int ssl_verify_CRL(int ok, X509_STORE_CTX *ctx, tcn_ssl_ctxt_t *c)
 {
     X509_OBJECT obj;
     X509_NAME *subject, *issuer;
@@ -526,7 +525,7 @@ static int ssl_verify_CRL(int ok, X509_STORE_CTX *ctx, tcn_ssl_conn_t *con)
      * the current certificate in order to verify it's integrity.
      */
     memset((char *)&obj, 0, sizeof(obj));
-    rc = ssl_X509_STORE_lookup(con->ctx->crl,
+    rc = ssl_X509_STORE_lookup(c->crl,
                                X509_LU_CRL, subject, &obj);
     crl = obj.data.crl;
 
@@ -580,7 +579,7 @@ static int ssl_verify_CRL(int ok, X509_STORE_CTX *ctx, tcn_ssl_conn_t *con)
      * the current certificate in order to check for revocation.
      */
     memset((char *)&obj, 0, sizeof(obj));
-    rc = ssl_X509_STORE_lookup(con->ctx->crl,
+    rc = ssl_X509_STORE_lookup(c->crl,
                                X509_LU_CRL, issuer, &obj);
 
     crl = obj.data.crl;
@@ -621,12 +620,13 @@ int SSL_callback_SSL_verify(int ok, X509_STORE_CTX *ctx)
    /* Get Apache context back through OpenSSL context */
     SSL *ssl = X509_STORE_CTX_get_ex_data(ctx,
                                           SSL_get_ex_data_X509_STORE_CTX_idx());
-    tcn_ssl_conn_t *con = (tcn_ssl_conn_t *)SSL_get_app_data(ssl);
+    tcn_ssl_ctxt_t *c = SSL_get_app_data2(ssl);
+
     /* Get verify ingredients */
     int errnum   = X509_STORE_CTX_get_error(ctx);
     int errdepth = X509_STORE_CTX_get_error_depth(ctx);
-    int verify   = con->ctx->verify_mode;
-    int depth    = con->ctx->verify_depth;
+    int verify   = c->verify_mode;
+    int depth    = c->verify_depth;
     int skip_crl = 0;
 
     if (verify == SSL_CVERIFY_UNSET ||
@@ -670,8 +670,8 @@ int SSL_callback_SSL_verify(int ok, X509_STORE_CTX *ctx)
     /*
      * Additionally perform CRL-based revocation checks
      */
-    if (ok && con->ctx->crl && !skip_crl) {
-        if (!(ok = ssl_verify_CRL(ok, ctx, con))) {
+    if (ok && c->crl && !skip_crl) {
+        if (!(ok = ssl_verify_CRL(ok, ctx, c))) {
             errnum = X509_STORE_CTX_get_error(ctx);
             /* TODO: Log something */
         }
@@ -680,10 +680,14 @@ int SSL_callback_SSL_verify(int ok, X509_STORE_CTX *ctx)
      * If we already know it's not ok, log the real reason
      */
     if (!ok) {
+        // Just in case that sslnetwork stuff was used, which is not true for netty but it can't harm to still
+        // guard against it.
+        tcn_ssl_conn_t *con = (tcn_ssl_conn_t *)SSL_get_app_data(ssl);
+
         /* TODO: Some logging
          * Certificate Verification: Error
          */
-        if (con->peer) {
+        if (con != NULL && con->peer) {
             X509_free(con->peer);
             con->peer = NULL;
         }
@@ -732,6 +736,88 @@ void SSL_callback_handshake(const SSL *ssl, int where, int rc)
         con->reneg_state = RENEG_REJECT;
     }
 
+}
+
+int SSL_callback_next_protos(SSL *ssl, const unsigned char **data,
+                             unsigned int *len, void *arg)
+{
+    tcn_ssl_ctxt_t *ssl_ctxt = arg;
+
+    *data = ssl_ctxt->next_proto_data;
+    *len = ssl_ctxt->next_proto_len;
+
+    return SSL_TLSEXT_ERR_OK;
+}
+
+/* The code here is inspired by nghttp2
+ *
+ * See https://github.com/tatsuhiro-t/nghttp2/blob/ae0100a9abfcf3149b8d9e62aae216e946b517fb/src/shrpx_ssl.cc#L244 */
+int select_next_proto(SSL *ssl, unsigned char **out, unsigned char *outlen,
+        const unsigned char *in, unsigned int inlen, unsigned char *supported_protos,
+        unsigned int supported_protos_len, int failure_behavior) {
+
+    unsigned int i = 0;
+    unsigned char target_proto_len;
+    unsigned char *p;
+    unsigned char *end;
+    unsigned char *proto;
+    unsigned char proto_len;
+
+    while (i < supported_protos_len) {
+        target_proto_len = *supported_protos;
+        ++supported_protos;
+
+        p = in;
+        end = in + inlen;
+
+        while (p < end) {
+            proto_len = *p;
+            proto = ++p;
+
+            if (proto + proto_len <= end && target_proto_len == proto_len &&
+                    memcmp(supported_protos, proto, proto_len) == 0) {
+
+                // We found a match, so set the output and return with OK!
+                *out = proto;
+                *outlen = proto_len;
+
+                return SSL_TLSEXT_ERR_OK;
+            }
+            // Move on to the next protocol.
+            p += proto_len;
+        }
+
+        // increment len and pointers.
+        i += target_proto_len;
+        supported_protos += target_proto_len;
+    }
+
+    if (failure_behavior == SSL_SELECTOR_FAILURE_CHOOSE_MY_LAST_PROTOCOL) {
+         // There were no match but we just select our last protocol and hope the other peer support it.
+         //
+         // decrement the pointer again so the pointer points to the start of the protocol.
+         p -= proto_len;
+         *out = p;
+         *outlen = proto_len;
+         return SSL_TLSEXT_ERR_OK;
+    }
+    // TODO: OpenSSL currently not support to fail with fatal error. Once this changes we can also support it here.
+    //       Issue https://github.com/openssl/openssl/issues/188 has been created for this.
+    // Nothing matched so not select anything and just accept.
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
+int SSL_callback_select_next_proto(SSL *ssl, unsigned char **out, unsigned char *outlen,
+                         const unsigned char *in, unsigned int inlen,
+                         void *arg) {
+    tcn_ssl_ctxt_t *ssl_ctxt = arg;
+    return select_next_proto(ssl, out, outlen, in, inlen, ssl_ctxt->next_proto_data, ssl_ctxt->next_proto_len, ssl_ctxt->next_selector_failure_behavior);
+}
+
+int SSL_callback_alpn_select_proto(SSL* ssl, const unsigned char **out, unsigned char *outlen,
+        const unsigned char *in, unsigned int inlen, void *arg) {
+    tcn_ssl_ctxt_t *ssl_ctxt = arg;
+    return select_next_proto(ssl, out, outlen, in, inlen, ssl_ctxt->alpn_proto_data, ssl_ctxt->alpn_proto_len, ssl_ctxt->alpn_selector_failure_behavior);
 }
 
 #ifdef HAVE_OPENSSL_OCSP

@@ -17,7 +17,7 @@
 /** SSL network wrapper
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: sslnetwork.c 1456353 2013-03-14 07:35:56Z mturk $
  */
 
 #include "tcn.h"
@@ -143,6 +143,9 @@ static tcn_ssl_conn_t *ssl_create(JNIEnv *env, tcn_ssl_ctxt_t *ctx, apr_pool_t *
     apr_pollset_create(&(con->pollset), 1, pool, 0);
 
     SSL_set_app_data(ssl, (void *)con);
+
+    // Store for later usage in SSL_callback_SSL_verify
+    SSL_set_app_data2(ssl, ctx);
 
     if (ctx->mode) {
         /*
@@ -410,7 +413,7 @@ ssl_socket_recv(apr_socket_t *sock, char *buf, apr_size_t *len)
             rv  = apr_get_netos_error();
             i   = SSL_get_error(con->ssl, s);
             /* Special case if the "close notify" alert send by peer */
-            if (s == 0 && (SSL_get_shutdown(con->ssl) & SSL_RECEIVED_SHUTDOWN)) {
+            if (s == 0 && (con->ssl->shutdown & SSL_RECEIVED_SHUTDOWN)) {
                 con->shutdown_type = SSL_SHUTDOWN_TYPE_STANDARD;
                 return APR_EOF;
             }
@@ -647,7 +650,7 @@ TCN_IMPLEMENT_CALL(jint, SSLSocket, renegotiate)(TCN_STDARGS,
     if (SSL_get_state(con->ssl) != SSL_ST_OK) {
         return APR_EGENERAL;
     }
-    SSL_set_state(con->ssl, SSL_ST_ACCEPT);
+    con->ssl->state = SSL_ST_ACCEPT;
 
     apr_socket_timeout_get(con->sock, &timeout);
     ecode = SSL_ERROR_WANT_READ;

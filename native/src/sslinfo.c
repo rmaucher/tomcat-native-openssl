@@ -17,7 +17,7 @@
 /** SSL info wrapper
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: sslinfo.c 1442587 2013-02-05 13:49:48Z rjung $
  */
 
 #include "tcn.h"
@@ -177,19 +177,20 @@ static char *lookup_ssl_cert_dn(X509_NAME *xsname, int dnidx)
 
     for (i = 0; info_cert_dn_rec[i].fid != 0; i++) {
         if (info_cert_dn_rec[i].fid == dnidx) {
+            for (j = 0; j < sk_X509_NAME_ENTRY_num((STACK_OF(X509_NAME_ENTRY) *)
+                                                   (xsname->entries)); j++) {
+                xsne = sk_X509_NAME_ENTRY_value((STACK_OF(X509_NAME_ENTRY) *)
+                                                (xsname->entries), j);
 
-            for (j = 0; j < X509_NAME_entry_count(xsname); j++) {
-                xsne = X509_NAME_get_entry(xsname, j);
-                n = OBJ_obj2nid(X509_NAME_ENTRY_get_object(xsne));
+                n =OBJ_obj2nid((ASN1_OBJECT *)X509_NAME_ENTRY_get_object(xsne));
                 if (n == info_cert_dn_rec[i].nid && idx-- == 0) {
-                    ASN1_STRING *adata = X509_NAME_ENTRY_get_data(xsne);
-                    int len = ASN1_STRING_length(adata);
-                    result = malloc(len + 1);
-                    memcpy(result, ASN1_STRING_data(adata), len);
-                    result[len] = '\0';
+                    result = malloc(xsne->value->length + 1);
+                    memcpy(result, xsne->value->data,
+                                   xsne->value->length);
+                    result[xsne->value->length] = '\0';
 
 #if APR_CHARSET_EBCDIC
-                    ap_xlate_proto_from_ascii(result, len);
+                    ap_xlate_proto_from_ascii(result, xsne->value->length);
 #endif /* APR_CHARSET_EBCDIC */
                     break;
                 }
@@ -217,9 +218,8 @@ TCN_IMPLEMENT_CALL(jobject, SSLSocket, getInfoB)(TCN_STDARGS, jlong sock,
         {
             SSL_SESSION *session  = SSL_get_session(s->ssl);
             if (session) {
-                unsigned int len;
-                const unsigned char *id = SSL_SESSION_get_id(session, &len);
-                array = tcn_new_arrayb(e, id, len);
+                array = tcn_new_arrayb(e, &session->session_id[0],
+                                       session->session_id_length);
             }
         }
         break;
@@ -298,9 +298,8 @@ TCN_IMPLEMENT_CALL(jstring, SSLSocket, getInfoS)(TCN_STDARGS, jlong sock,
         {
             SSL_SESSION *session  = SSL_get_session(s->ssl);
             if (session) {
-                unsigned int len;
-                const unsigned char *id = SSL_SESSION_get_id(session, &len);
-                char *hs = convert_to_hex(id, len);
+                char *hs = convert_to_hex(&session->session_id[0],
+                                          session->session_id_length);
                 if (hs) {
                     value = tcn_new_string(e, hs);
                     free(hs);

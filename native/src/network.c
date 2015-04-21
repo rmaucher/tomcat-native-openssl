@@ -17,7 +17,7 @@
 /*
  *
  * @author Mladen Turk
- * @version $Id$
+ * @version $Id: network.c 1607296 2014-07-02 08:45:42Z kkolinko $
  */
 
 #include "tcn.h"
